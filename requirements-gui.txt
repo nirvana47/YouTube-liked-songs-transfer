@@ -1,0 +1,6 @@
+# GUI dependencies (installed in addition to requirements.txt).
+#
+# PySide6-Essentials bundles the Qt libraries the graphical wizard needs. It is a
+# self-contained wheel, so the app works without a system Tcl/Tk install and without
+# any App Store / code-signing / Apple Developer account.
+PySide6-Essentials>=6.6,<7

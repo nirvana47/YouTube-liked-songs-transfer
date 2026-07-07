@@ -11,8 +11,9 @@ This project does two things:
 Optionally, it can also create a private playlist on account B containing those songs.
 
 > Important: `ytmusicapi` is an unofficial YouTube Music API wrapper. It is not supported
-> or endorsed by Google. Use it carefully, run a dry run first, and keep your auth JSON
-> files private.
+> or endorsed by Google. Use it carefully, run a dry run first, and keep auth material
+> private. OAuth tokens are imported into macOS Keychain through `keyring`; local token
+> files are only needed for initial setup and should remain ignored by git.
 
 ## Can This Be More Automated?
 
@@ -53,28 +54,57 @@ The script intentionally authenticates both accounts separately:
 - `.env.example`: copy-paste template for OAuth client credentials.
 - `.gitignore`: excludes auth files, local virtualenvs, caches, and reports.
 
+## Security Defaults
+
+- OAuth token JSON is stored in macOS Keychain through the Python `keyring` library when using `--auth-mode oauth`.
+- The script imports an existing OAuth token file into Keychain the first time it runs, then uses a temporary `0600` file only while `ytmusicapi` is active.
+- Non-dry-run account-B writes require `--confirm`. Without it, the script prompts interactively; in non-interactive shells it exits before writing.
+- YouTube Music HTTP 429 rate-limit responses are retried with exponential backoff and small jitter.
+- `.gitignore` covers auth artifacts, OAuth client-secret files, token files, and transfer reports.
+
 ## Requirements
 
 - Python 3.10 or newer.
 - Access to both Gmail/YouTube accounts in a browser.
 - YouTube Music available for both accounts.
 
-## Install
+## Install on macOS
 
-From this directory:
+Copy and paste these commands from the repo directory. They install Homebrew Python if needed, create a local virtual environment, and install the app dependencies including the progress-bar UI.
 
 ```bash
+# 1) Install Homebrew if you do not already have it
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 2) Install Python 3 with Homebrew
+brew install python
+
+# 3) Create and activate a local virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
+
+# 4) Install dependencies
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+
+# 5) Check the command help
+python3 transfer_liked_songs.py --help
+```
+
+After setup, keep using the same Terminal window or reactivate the environment before each run:
+
+```bash
+cd path/to/YouTube-liked-songs-transfer
+source .venv/bin/activate
+```
+
+If `pip` cannot reach PyPI from your network, retry from a network that can access PyPI:
+
+```bash
 python3 -m pip install -r requirements.txt
 ```
 
-If `pip` cannot reach PyPI from your network, install `ytmusicapi` when you are on a
-network that can access PyPI:
-
-```bash
-python3 -m pip install "ytmusicapi>=1.8,<2"
-```
+The `rich` dependency is used for real-time progress bars and cleaner terminal messages. If it is unavailable, the script falls back to plain text output.
 
 ## Recommended: OAuth Auth
 
@@ -149,6 +179,10 @@ sign out of the other account.
 
 ### Dry Run With OAuth
 
+Run the transfer in dry-run mode first. On first run, the OAuth token files are imported
+into macOS Keychain via `keyring`; subsequent OAuth runs can use the Keychain copy even
+if the original ignored token files are removed.
+
 ```bash
 python3 transfer_liked_songs.py \
   --auth-mode oauth \
@@ -164,7 +198,8 @@ python3 transfer_liked_songs.py \
   --auth-mode oauth \
   --source-auth auth/account_a_oauth.json \
   --target-auth auth/account_b_oauth.json \
-  --skip-existing-target-likes
+  --skip-existing-target-likes \
+  --confirm
 ```
 
 If you prefer flags instead of environment variables:
@@ -257,7 +292,7 @@ python3 transfer_liked_songs.py --dry-run --limit 25
 After the dry run looks right:
 
 ```bash
-python3 transfer_liked_songs.py
+python3 transfer_liked_songs.py --confirm
 ```
 
 This thumbs-up each source video ID on account B. The operation is effectively safe to
@@ -266,7 +301,7 @@ repeat because liking an already-liked song should leave it liked.
 To reduce unnecessary writes, have the script read account B's current liked songs first:
 
 ```bash
-python3 transfer_liked_songs.py --skip-existing-target-likes
+python3 transfer_liked_songs.py --skip-existing-target-likes --confirm
 ```
 
 ## Duplicate and Unavailable Songs
@@ -303,7 +338,8 @@ python3 transfer_liked_songs.py \
   --source-auth auth/account_a_oauth.json \
   --target-auth auth/account_b_oauth.json \
   --skip-existing-target-likes \
-  --skip-source-unavailable
+  --skip-source-unavailable \
+  --confirm
 ```
 
 The script intentionally does not search for replacements automatically. Replacement
@@ -316,7 +352,8 @@ To both like the songs on account B and create a private playlist:
 ```bash
 python3 transfer_liked_songs.py \
   --skip-existing-target-likes \
-  --playlist-title "Imported liked songs from account A"
+  --playlist-title "Imported liked songs from account A" \
+  --confirm
 ```
 
 To create only the playlist without changing thumbs-up status:
@@ -324,7 +361,8 @@ To create only the playlist without changing thumbs-up status:
 ```bash
 python3 transfer_liked_songs.py \
   --no-like \
-  --playlist-title "Imported liked songs from account A"
+  --playlist-title "Imported liked songs from account A" \
+  --confirm
 ```
 
 Playlist privacy can be `PRIVATE`, `UNLISTED`, or `PUBLIC`:
@@ -332,7 +370,8 @@ Playlist privacy can be `PRIVATE`, `UNLISTED`, or `PUBLIC`:
 ```bash
 python3 transfer_liked_songs.py \
   --playlist-title "Imported liked songs from account A" \
-  --playlist-privacy PRIVATE
+  --playlist-privacy PRIVATE \
+  --confirm
 ```
 
 ## Useful Options
@@ -345,6 +384,7 @@ python3 transfer_liked_songs.py \
 --oauth-client-secret VALUE        OAuth client secret, or set YTMUSICAPI_CLIENT_SECRET.
 --limit N                          Read at most N liked songs from account A.
 --dry-run                          Preview only; do not modify account B.
+--confirm                          Explicitly allow non-dry-run writes to account B.
 --skip-existing-target-likes       Skip songs account B already likes.
 --skip-source-unavailable          Skip tracks marked unavailable in account A response.
 --no-like                          Do not apply LIKE ratings to account B.
@@ -355,6 +395,11 @@ python3 transfer_liked_songs.py \
 --sleep SECONDS                    Delay between write calls.
 --report PATH                      JSON report output path.
 --fail-fast                        Stop on first write failure.
+--keyring-service NAME             Keychain/keyring service name for OAuth token storage.
+--source-keyring-account NAME      Keychain/keyring account name for account A.
+--target-keyring-account NAME      Keychain/keyring account name for account B.
+--rate-limit-retries N             Number of retries for HTTP 429 responses.
+--rate-limit-initial-backoff SEC   Initial backoff delay for HTTP 429 retries.
 ```
 
 ## Report

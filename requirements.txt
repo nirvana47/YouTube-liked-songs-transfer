@@ -1,1 +1,3 @@
 ytmusicapi>=1.8,<2
+keyring>=25,<26
+rich>=13,<14

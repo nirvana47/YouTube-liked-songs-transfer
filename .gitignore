@@ -1,11 +1,28 @@
 .venv/
 __pycache__/
 *.py[cod]
+
+# Local environment files
 .env
 .env.*
 !.env.example
 
+# Authentication artifacts: OAuth tokens, browser headers, and Google client secrets
 auth/
-*.json
-!example*.json
+*_oauth.json
+*oauth*.json
+*token*.json
+*client_secret*.json
+client_secret*.json
+credentials*.json
+*.secret.json
+
+# Transfer/report outputs and log files
 transfer_report*.json
+reports/
+output/
+*.report.json
+*.log
+
+# Keep intentionally committed examples trackable
+!example*.json
