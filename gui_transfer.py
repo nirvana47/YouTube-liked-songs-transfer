@@ -471,11 +471,18 @@ class _AccountSection:
         steps = QLabel(
             f"<b>Step A.</b> Open Chrome or Firefox and go to <b>music.youtube.com</b>. "
             f"Make sure you're signed in as <b>{self.label}</b>.<br>"
-            "<b>Step B.</b> Open DevTools (<b>F12</b> or <b>Cmd+Option+I</b>) → <b>Network</b> tab.<br>"
-            "<b>Step C.</b> Refresh the page, then click any request to "
-            "<b>music.youtube.com</b> in the list.<br>"
-            "<b>Step D.</b> Right-click the request → <b>Copy</b> → <b>Copy as cURL (bash)</b>.<br>"
-            "<b>Step E.</b> Paste it in the box below and click <b>Use this session</b>."
+            "<b>Step B.</b> Open DevTools (<b>F12</b> or <b>Cmd+Option+I</b>) → <b>Network</b> tab, "
+            "then click the <b>Fetch/XHR</b> filter if you see it.<br>"
+            "<b>Step C.</b> <b>Play any song</b> on YouTube Music first — this ensures a "
+            "<b>browse</b> request is generated.<br>"
+            "<b>Step D.</b> After the song starts playing, reload the page (<b>Cmd+R</b>), "
+            "then type <b>browse</b> into the Network filter box at the top.<br>"
+            "<b>Step E.</b> Look for <b>browse?prettyPrint=false</b> "
+            "(<b>type: fetch</b>, <b>status: 200</b>, from "
+            "<b>music.youtube.com/youtubei/v1/browse</b>).<br>"
+            "<b>Step F.</b> Right-click that <b>browse</b> request → <b>Copy</b> → "
+            "<b>Copy as cURL (bash)</b>.<br>"
+            "<b>Step G.</b> Paste it in the box below and click <b>Use this session</b>."
         )
         steps.setWordWrap(True)
         layout.addWidget(steps)

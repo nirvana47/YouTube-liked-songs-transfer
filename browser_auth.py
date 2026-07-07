@@ -20,7 +20,11 @@ this module never touches the network.
 from __future__ import annotations
 
 import json
+import re
 import shlex
+import time
+from hashlib import sha1
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +41,10 @@ _VALUE_FLAGS_TO_SKIP = {
     "--data-urlencode", "-X", "--request", "-e", "--referer",
     "-A", "--user-agent", "-x", "--proxy", "--url",
 }
+
+# Data flags that mark the start of a request body. Chrome may append a binary
+# gzip payload after these; parse_curl() truncates at the first occurrence.
+_DATA_FLAG_RE = re.compile(r"(?<!\S)(?:--data-raw|--data-binary|--data-ascii|--data-urlencode|--data|-d)(?=\s|=|$)")
 
 
 class CurlParseError(ValueError):
@@ -65,6 +73,22 @@ def parse_curl(curl_text: str) -> dict[str, Any]:
     # Normalise line continuations from bash (\ + newline) and Windows carets so
     # the whole command tokenises as one logical line.
     text = text.replace("\\\r\n", " ").replace("\\\n", " ").replace("^\r\n", " ").replace("^\n", " ")
+
+    # Chrome's "Copy as cURL" appends --data-raw $'...' for binary/gzip bodies.
+    # This binary blob often contains non-printable characters that corrupt
+    # string parsing or shlex. Since we only need the headers and URL (which
+    # always appear BEFORE the data), we truncate the string at the data flag.
+    match = _DATA_FLAG_RE.search(text)
+    if match:
+        text = text[:match.start()].strip()
+
+    # Strip bash's ANSI-C quoting prefix ($') if it was left at the end.
+    if text.endswith("$'"):
+        text = text[:-2].strip()
+
+    # Final safety: remove any non-printable/binary artifacts that might have
+    # snuck into the headers part of the string.
+    text = "".join(c for c in text if c.isprintable() or c.isspace())
 
     if "curl" not in text.lower():
         raise CurlParseError(
@@ -156,7 +180,20 @@ def build_headers(user_headers: dict[str, str]) -> dict[str, str]:
         if not key.startswith("sec") and key not in _IGNORE_HEADERS
     }
     cleaned.update(_initialize_headers())
+    cleaned.setdefault("x-goog-authuser", "0")
+    if "cookie" in cleaned and "SAPISIDHASH" not in cleaned.get("authorization", ""):
+        origin = cleaned.get("origin") or cleaned.get("x-origin") or "https://music.youtube.com"
+        cleaned["authorization"] = _authorization_from_cookie(cleaned["cookie"], origin)
     return cleaned
+
+
+def _authorization_from_cookie(raw_cookie: str, origin: str) -> str:
+    cookie = SimpleCookie()
+    cookie.load(raw_cookie.replace('"', ""))
+    sapisid = cookie[REQUIRED_COOKIE_TOKEN].value
+    timestamp = str(int(time.time()))
+    digest = sha1(f"{timestamp} {sapisid} {origin}".encode("utf-8")).hexdigest()
+    return f"SAPISIDHASH {timestamp}_{digest}"
 
 
 def validate_headers(headers: dict[str, str], url: str = "") -> None:
@@ -225,6 +262,7 @@ def browser_file_status(path: Any) -> tuple[str, str]:
         return ("invalid", "The sign-in file is not in the expected format — please sign in again.")
     lowered = {str(k).lower(): v for k, v in data.items()}
     cookie = str(lowered.get("cookie", ""))
-    if not cookie or REQUIRED_COOKIE_TOKEN not in cookie:
+    authorization = str(lowered.get("authorization", ""))
+    if not cookie or REQUIRED_COOKIE_TOKEN not in cookie or "SAPISIDHASH" not in authorization:
         return ("invalid", "The saved browser session is incomplete — please sign in again.")
     return ("ok", "Signed in from your browser — ready to use.")
