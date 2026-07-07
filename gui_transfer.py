@@ -595,10 +595,16 @@ class AuthPage(QWizardPage):
         self.creds_box = QGroupBox("Google OAuth client credentials (one-time)")
         creds_layout = QVBoxLayout(self.creds_box)
         self.help_label = QLabel(
-            "You need a Google OAuth client ID + secret once. In "
-            f'<a href="{GOOGLE_CLOUD_CONSOLE_URL}">Google Cloud Console → Credentials</a>, '
-            "create an “OAuth client ID” of type “TVs and Limited Input devices”, then paste "
-            "the two values below. They are saved to a local <code>.env</code> so you only do this once."
+            "You need a Google OAuth client ID + secret once. If Google says “select a project”, "
+            "that is expected — create a small project first, then make the OAuth client:<br><br>"
+            f'1. Open <a href="{GOOGLE_CLOUD_CONSOLE_URL}">Google Cloud Console → Credentials</a> → '
+            "click <b>Select a project</b> → <b>New Project</b> → give it any name → <b>Create</b><br>"
+            "2. In the left sidebar, go to <b>APIs & Services</b> → <b>Credentials</b><br>"
+            "3. Click <b>+ Create Credentials</b> → <b>OAuth client ID</b><br>"
+            "4. Application type: <b>TVs and Limited Input devices</b><br>"
+            "5. Give it any name → <b>Create</b><br>"
+            "6. Copy the <b>Client ID</b> and <b>Client Secret</b> shown → paste them here.<br><br>"
+            "The app saves these to a local <code>.env</code> so you only do this once."
         )
         self.help_label.setOpenExternalLinks(True)
         self.help_label.setWordWrap(True)
@@ -1705,21 +1711,21 @@ class TransferWizard(QWizard):
             QMessageBox.information(self, "Clean Up scheduled", "Cleanup will run when you quit.")
             return
         text = (
-            "Clean Up will run when you quit. It will delete:\n\n"
-            "- transfer_liked_songs.venv/ (downloaded packages, about 250MB)\n"
-            "- Stored OAuth tokens/secrets from macOS Keychain\n"
-            "- .env credentials\n"
-            "- Local auth/token files in auth/ and the repo folder\n\n"
-            "Next launch will re-download dependencies and you’ll need to sign in again."
+            "When you quit, the app will delete:\n\n"
+            "• transfer_liked_songs.venv/ (~250MB of downloaded packages)\n"
+            "• Your saved sign-in tokens from macOS Keychain\n"
+            "• .env credentials and local auth files\n\n"
+            "You'll need to sign in again and re-download packages on next launch."
         )
-        reply = QMessageBox.warning(
-            self,
-            "Schedule Clean Up?",
-            text,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Schedule clean up?")
+        dialog.setText(text)
+        cancel_button = dialog.addButton("Cancel", QMessageBox.RejectRole)
+        schedule_button = dialog.addButton("Schedule Clean Up", QMessageBox.DestructiveRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+        if dialog.clickedButton() != schedule_button:
             return
         self.cleanup_requested = True
         if self.logger is not None:
