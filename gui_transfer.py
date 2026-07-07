@@ -1488,6 +1488,10 @@ class DonePage(QWizardPage):
         self.open_report_btn = QPushButton("Show report file")
         self.open_report_btn.clicked.connect(self._open_report)
         layout.addWidget(self.open_report_btn)
+
+        self.start_over_btn = QPushButton("Start over")
+        self.start_over_btn.clicked.connect(self._start_over)
+        layout.addWidget(self.start_over_btn)
         layout.addStretch(1)
 
     def initializePage(self) -> None:
@@ -1541,6 +1545,15 @@ class DonePage(QWizardPage):
         except Exception:
             pass
 
+    def _start_over(self) -> None:
+        self.tw.preview_loaded = False
+        self.tw.unique_tracks = []
+        self.tw.preview_stats = {}
+        self.tw.final_report = None
+        self.tw.cancel_event.clear()
+        self.tw.transfer_running = False
+        self.tw.restart()
+
 
 # ---------------------------------------------------------------------------
 # The wizard shell
@@ -1559,7 +1572,7 @@ class TransferWizard(QWizard):
         self.setOption(QWizard.HaveCustomButton2, True)
         self.setButtonText(QWizard.CustomButton1, "Quit")
         self.setButtonText(QWizard.CustomButton2, "Clean Up")
-        self.customButtonClicked.connect(self._on_custom_button_clicked)
+        self.setButtonText(QWizard.FinishButton, "Quit")
         self.setButtonLayout(
             [
                 QWizard.CustomButton1,
@@ -1602,6 +1615,56 @@ class TransferWizard(QWizard):
         self.setPage(PAGE_DONE, DonePage(self))
         self.setStartId(PAGE_AUTH)
 
+        self.currentIdChanged.connect(self._on_page_changed)
+        self._wire_footer_buttons()
+        self._on_page_changed(PAGE_AUTH)
+
+    def _wire_footer_buttons(self) -> None:
+        pairs = (
+            (QWizard.CustomButton1, self._quit_from_footer),
+            (QWizard.CustomButton2, self._cleanup_from_footer),
+        )
+        for btn_id, handler in pairs:
+            btn = self.button(btn_id)
+            if not btn:
+                continue
+            if bool(btn.property("ls_transfer_connected")):
+                continue
+            btn.clicked.connect(handler)
+            btn.setProperty("ls_transfer_connected", True)
+
+    def _quit_from_footer(self) -> None:
+        if self.logger is not None:
+            try:
+                self.logger.info("Quit footer button clicked.")
+            except Exception:
+                pass
+        self.close()
+
+    def _cleanup_from_footer(self) -> None:
+        if self.logger is not None:
+            try:
+                self.logger.info("Clean Up footer button clicked.")
+            except Exception:
+                pass
+        self._schedule_cleanup()
+
+    def _on_page_changed(self, page_id: int) -> None:
+        # Ensure footer buttons stay appropriately labeled, enabled, and wired.
+        self._wire_footer_buttons()
+        if page_id == PAGE_DONE:
+            self.setButtonText(QWizard.FinishButton, "Quit")
+        else:
+            self.setButtonText(QWizard.FinishButton, "Finish")
+
+        # Custom buttons are sometimes disabled by wizard state transitions.
+        # Force them to stay enabled if the app is idle.
+        if not self.transfer_running:
+            for btn_id in (QWizard.CustomButton1, QWizard.CustomButton2):
+                btn = self.button(btn_id)
+                if btn:
+                    btn.setEnabled(True)
+
     def attach_session(self, stack: Any, source: Any, target: Any) -> None:
         # Replace any earlier session (e.g. user reconnected).
         if self.exit_stack is not None:
@@ -1629,12 +1692,6 @@ class TransferWizard(QWizard):
                 self.logger.info("Demo Mode enabled from the Connect step: %s", name)
             except Exception:
                 pass
-
-    def _on_custom_button_clicked(self, which: int) -> None:
-        if which == QWizard.CustomButton1:
-            self.close()
-        elif which == QWizard.CustomButton2:
-            self._schedule_cleanup()
 
     def _schedule_cleanup(self) -> None:
         if self.transfer_running:
