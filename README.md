@@ -1,5 +1,7 @@
 # YouTube Music Liked Songs Transfer
 
+See [BACKLOG.md](BACKLOG.md) for planned improvements and known gaps.
+
 Transfer every liked YouTube Music song from Gmail/YouTube account A to account B with
 [`ytmusicapi`](https://github.com/sigma67/ytmusicapi).
 

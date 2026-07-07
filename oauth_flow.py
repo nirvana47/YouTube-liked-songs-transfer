@@ -104,13 +104,37 @@ def _default_oauth_factory(client_id: str, client_secret: str) -> Any:
 
 
 def _default_store_token(oauth: Any, raw: dict[str, Any], token_path: str) -> None:
-    """Finalize a raw token dict into a stored OAuth token file (lazy import)."""
+    """Finalize a raw token dict into a stored OAuth token file (lazy import).
+
+    This mirrors ytmusicapi's own :meth:`RefreshingToken.prompt_for_token`
+    exactly (as corrected in ytmusicapi 1.12.1, PR #927). Google's device-flow
+    token response contains a ``refresh_token_expires_in`` field that the strict
+    ``Token`` dataclass does not accept, so we must not blindly splat ``raw`` into
+    the constructor. Instead we pass only the fields the token models and:
+
+    * set ``expires_in`` to the *refresh token* lifetime
+      (``refresh_token_expires_in``), falling back to the access-token lifetime,
+      and
+    * call ``update(raw)`` so ``expires_at`` is computed from the *access token*
+      ``expires_in`` as an absolute UNIX epoch (avoiding immediate re-expiry).
+
+    Assigning ``local_cache`` writes the file via the library's own store path
+    and keeps it in sync when the access token is auto-refreshed later.
+    """
     from ytmusicapi.auth.oauth.token import RefreshingToken
 
-    ref = RefreshingToken(credentials=oauth, **raw)
-    ref.update(ref.as_dict())
+    refresh_token_expires_in = raw.get("refresh_token_expires_in", raw["expires_in"])
+    ref = RefreshingToken(
+        credentials=oauth,
+        access_token=raw["access_token"],
+        refresh_token=raw["refresh_token"],
+        scope=raw["scope"],
+        token_type=raw["token_type"],
+        expires_in=refresh_token_expires_in,
+    )
+    ref.update(raw)
     Path(token_path).parent.mkdir(parents=True, exist_ok=True)
-    ref.store_token(str(token_path))
+    ref.local_cache = Path(token_path)
 
 
 class OAuthSignInEngine:

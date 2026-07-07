@@ -2,6 +2,8 @@
 transfer_liked_songs.venv/
 __pycache__/
 *.py[cod]
+.DS_Store
+
 
 # Local environment files
 .env

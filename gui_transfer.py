@@ -46,6 +46,7 @@ try:
         QComboBox,
         QFileDialog,
         QFormLayout,
+        QFrame,
         QGroupBox,
         QHBoxLayout,
         QLabel,
@@ -54,6 +55,7 @@ try:
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QSpinBox,
         QTableWidget,
         QTableWidgetItem,
@@ -77,13 +79,31 @@ from ytmusicapi.models.content.enums import LikeStatus
 
 # Local, Qt-free support modules.
 import mock_backend
-from errors import classify_retryable, friendly_error, setup_run_logger
+from errors import classify_retryable, friendly_error as _base_friendly_error, setup_run_logger
 from oauth_flow import (
     GOOGLE_CLOUD_CONSOLE_URL,
     OAuthSignInEngine,
     PollState,
     account_file_status,
 )
+
+
+def friendly_error(exc: BaseException) -> str:
+    """GUI-specific friendly errors layered on top of shared error handling."""
+    text = str(exc).strip()
+    lowered = text.lower()
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    if status_code == 400 or response_status == 400 or (
+        "http 400" in lowered or "bad request" in lowered or "invalid argument" in lowered
+    ):
+        return (
+            "YouTube API returned an error. Make sure YouTube Data API v3 is enabled in your "
+            "Google Cloud project (APIs & Services → Library → search ‘YouTube Data API v3’ → Enable). "
+            "If it is already enabled, click 'Sign in again' for Source account (A) and try verifying again."
+        )
+    return _base_friendly_error(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +378,9 @@ class _AccountSection:
         # The live sign-in panel (hidden until the user clicks Sign in).
         self.panel = QWidget()
         panel_layout = QVBoxLayout(self.panel)
-        panel_layout.setContentsMargins(0, 4, 0, 0)
+        panel_layout.setContentsMargins(10, 10, 10, 10)
+        panel_layout.setSpacing(12)  # Vertical spacing between elements
+
         self.instruction = QLabel("Starting sign-in…")
         self.instruction.setWordWrap(True)
         panel_layout.addWidget(self.instruction)
@@ -369,15 +391,19 @@ class _AccountSection:
         code_font.setBold(True)
         self.code_label.setFont(code_font)
         self.code_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.code_label.setAlignment(Qt.AlignCenter)
         panel_layout.addWidget(self.code_label)
 
         self.url_label = QLabel("")
         self.url_label.setOpenExternalLinks(True)
         self.url_label.setWordWrap(True)
+        self.url_label.setAlignment(Qt.AlignCenter)
         panel_layout.addWidget(self.url_label)
 
         btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
         self.open_btn = QPushButton("Open browser")
+        self.open_btn.setMinimumWidth(140)
         self.open_btn.clicked.connect(self._open_browser)
         self.open_btn.setEnabled(False)
         self.retry_btn = QPushButton("Try again")
@@ -391,10 +417,12 @@ class _AccountSection:
         self.spinner = QProgressBar()
         self.spinner.setRange(0, 0)  # indeterminate "busy" spinner
         self.spinner.setVisible(False)
+        self.spinner.setFixedHeight(12)
         panel_layout.addWidget(self.spinner)
 
         self.poll_label = QLabel("")
         self.poll_label.setWordWrap(True)
+        self.poll_label.setAlignment(Qt.AlignCenter)
         panel_layout.addWidget(self.poll_label)
 
         self.panel.setVisible(False)
@@ -537,7 +565,18 @@ class AuthPage(QWizardPage):
         self._connected = False
         self.setTitle("Step 1 of 5 — Connect your accounts")
 
-        layout = QVBoxLayout(self)
+        # Step 1 can have a lot of content (help text, account sign-ins, demo toggle).
+        # Wrap everything in a QScrollArea so it never clips.
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        main_layout.addWidget(self.scroll)
+
+        self.content = QWidget()
+        self.scroll.setWidget(self.content)
+        layout = QVBoxLayout(self.content)
 
         if self.tw.demo_mode:
             self.setSubTitle("Demo mode: pick a scenario to preview how the app behaves — no sign-in needed.")
@@ -558,6 +597,12 @@ class AuthPage(QWizardPage):
         self.scenario_combo = QComboBox()
         for name in sorted(mock_backend.SCENARIOS):
             self.scenario_combo.addItem(mock_backend.SCENARIO_LABELS.get(name, name), name)
+        
+        # Default to the happy path so the dropdown doesn't show an error state by default.
+        happy_idx = self.scenario_combo.findData("happy")
+        if happy_idx >= 0:
+            self.scenario_combo.setCurrentIndex(happy_idx)
+        
         form.addWidget(self.scenario_combo)
         self.demo_desc = QLabel("")
         self.demo_desc.setWordWrap(True)
@@ -598,20 +643,25 @@ class AuthPage(QWizardPage):
             "You need a Google OAuth client ID + secret once. If Google says “select a project”, "
             "that is expected — create a small project first, then make the OAuth client:<br><br>"
             f'1. Open <a href="{GOOGLE_CLOUD_CONSOLE_URL}">Google Cloud Console → Credentials</a> → '
-            "click <b>Select a project</b> → <b>New Project</b> → give it any name → <b>Create</b><br>"
-            "2. In the left sidebar, go to <b>APIs & Services</b> → <b>Credentials</b><br>"
-            "3. Click <b>+ Create Credentials</b> → <b>OAuth client ID</b><br>"
-            "4. Application type: <b>TVs and Limited Input devices</b><br>"
-            "5. Give it any name → <b>Create</b><br>"
-            "6. Copy the <b>Client ID</b> and <b>Client Secret</b> shown → paste them here.<br><br>"
+            "click <b>Select a project</b> → <b>New Project</b> → name it → <b>Create</b><br>"
+            "2. Enable YouTube access: <b>APIs & Services</b> → <b>Library</b> → search <b>YouTube Data API v3</b> → <b>Enable</b><br>"
+            "3. Go to <b>APIs & Services</b> → <b>Credentials</b><br>"
+            "4. Click <b>+ Create Credentials</b> → <b>OAuth client ID</b><br>"
+            "5. Application type: <b>TVs and Limited Input devices</b><br>"
+            "6. Give it any name → <b>Create</b><br>"
+            "7. In the left sidebar: <b>OAuth consent screen</b> → scroll to <b>Test users</b> → click <b>+ Add Users</b> → add ALL email addresses you plan to sign in with → <b>Save</b><br>"
+            "8. Back in <b>Credentials</b>, copy the <b>Client ID</b> and <b>Client Secret</b> shown → paste them here.<br><br>"
             "The app saves these to a local <code>.env</code> so you only do this once."
         )
         self.help_label.setOpenExternalLinks(True)
         self.help_label.setWordWrap(True)
+        self.help_label.setMinimumHeight(380)  # Ensure all text is visible with API + test-user steps
         creds_layout.addWidget(self.help_label)
 
         creds_form = QFormLayout()
         self.client_id_edit = QLineEdit()
+        self.client_id_edit.setCursorPosition(0)  # Show beginning of text
+        self.client_id_edit.editingFinished.connect(lambda: self.client_id_edit.setCursorPosition(0))
         self.client_secret_edit = QLineEdit()
         self.client_secret_edit.setEchoMode(QLineEdit.Password)
         self.client_id_edit.setPlaceholderText("Loaded from .env if present")
@@ -678,6 +728,12 @@ class AuthPage(QWizardPage):
         self.inline_demo_combo = QComboBox()
         for name in sorted(mock_backend.SCENARIOS):
             self.inline_demo_combo.addItem(mock_backend.SCENARIO_LABELS.get(name, name), name)
+        
+        # Default to the happy path so the dropdown doesn't show an error state by default.
+        happy_idx = self.inline_demo_combo.findData("happy")
+        if happy_idx >= 0:
+            self.inline_demo_combo.setCurrentIndex(happy_idx)
+            
         self.inline_demo_btn = QPushButton("Try Demo Mode")
         self.inline_demo_btn.clicked.connect(self._start_inline_demo)
         row.addWidget(self.inline_demo_combo, 1)
@@ -717,6 +773,7 @@ class AuthPage(QWizardPage):
         except Exception:
             pass
         self.client_id_edit.setText(os.getenv("YTMUSICAPI_CLIENT_ID", ""))
+        self.client_id_edit.setCursorPosition(0)
         self.client_secret_edit.setText(os.getenv("YTMUSICAPI_CLIENT_SECRET", ""))
 
     def current_credentials(self) -> tuple[str, str]:
