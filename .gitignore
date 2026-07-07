@@ -1,4 +1,5 @@
 .venv/
+transfer_liked_songs.venv/
 __pycache__/
 *.py[cod]
 
@@ -17,12 +18,11 @@ client_secret*.json
 credentials*.json
 *.secret.json
 
-# Transfer/report outputs and log files
+# Transfer/report outputs
 transfer_report*.json
 reports/
 output/
 *.report.json
-*.log
 
 # Keep intentionally committed examples trackable
 !example*.json

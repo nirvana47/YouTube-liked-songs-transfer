@@ -22,6 +22,7 @@ real credentials.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import threading
 import time
@@ -50,6 +51,7 @@ try:
         QLabel,
         QLineEdit,
         QPlainTextEdit,
+        QMessageBox,
         QProgressBar,
         QPushButton,
         QSpinBox,
@@ -235,10 +237,84 @@ PAGE_DONE = 4
 
 SOURCE_TOKEN_NAME = "account_a_oauth.json"
 TARGET_TOKEN_NAME = "account_b_oauth.json"
+APP_VENV_NAME = "transfer_liked_songs.venv"
 
 
 def default_auth_path(name: str) -> str:
     return str(SCRIPT_DIR / "auth" / name)
+
+
+def _safe_unlink(path: Path, logger: Any = None) -> bool:
+    try:
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+            if logger is not None:
+                logger.info("Deleted file: %s", path.name if path.parent == SCRIPT_DIR else path)
+            return True
+    except Exception:
+        if logger is not None:
+            logger.warning("Could not delete file: %s", path, exc_info=True)
+    return False
+
+
+def _safe_rmtree(path: Path, logger: Any = None) -> bool:
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+            if logger is not None:
+                logger.info("Deleted folder: %s", path.name if path.parent == SCRIPT_DIR else path)
+            return True
+    except Exception:
+        if logger is not None:
+            logger.warning("Could not delete folder: %s", path, exc_info=True)
+    return False
+
+
+def perform_cleanup(logger: Any = None) -> list[str]:
+    """Delete local runtime/auth material after the user confirms cleanup."""
+    deleted: list[str] = []
+
+    if _safe_rmtree(SCRIPT_DIR / APP_VENV_NAME, logger):
+        deleted.append(APP_VENV_NAME)
+
+    for env_file in sorted(SCRIPT_DIR.glob(".env*")):
+        if env_file.name == ".env.example":
+            continue
+        if _safe_unlink(env_file, logger):
+            deleted.append(env_file.name)
+
+    auth_dir = SCRIPT_DIR / "auth"
+    if auth_dir.exists():
+        for path in sorted(auth_dir.glob("*.json")):
+            if _safe_unlink(path, logger):
+                deleted.append(str(path.relative_to(SCRIPT_DIR)))
+
+    for pattern in ("*_oauth.json", "*oauth*.json", "*token*.json", "*client_secret*.json", "client_secret*.json", "credentials*.json", "*.secret.json"):
+        for path in sorted(SCRIPT_DIR.glob(pattern)):
+            if _safe_unlink(path, logger):
+                rel = str(path.relative_to(SCRIPT_DIR))
+                if rel not in deleted:
+                    deleted.append(rel)
+
+    try:
+        import keyring
+
+        for account in ("source", "target"):
+            try:
+                keyring.delete_password(KEYRING_SERVICE, account)
+                deleted.append(f"macOS Keychain token: {account}")
+                if logger is not None:
+                    logger.info("Deleted Keychain token for account: %s", account)
+            except Exception:
+                if logger is not None:
+                    logger.info("No Keychain token deleted for account: %s", account, exc_info=True)
+    except Exception:
+        if logger is not None:
+            logger.info("Keyring cleanup skipped; keyring module/backend unavailable.", exc_info=True)
+
+    if logger is not None:
+        logger.info("Cleanup finished. Deleted: %s", deleted or "nothing")
+    return deleted
 
 
 def _interruptible_sleep(seconds: float, cancel_event: Optional[threading.Event]) -> None:
@@ -579,7 +655,36 @@ class AuthPage(QWizardPage):
         self.browser_box.setVisible(False)
         layout.addWidget(self.browser_box)
 
+        self._build_try_demo_ui(layout)
         self._prefill_from_env()
+
+    def _build_try_demo_ui(self, layout: QVBoxLayout) -> None:
+        demo_box = QGroupBox("Not ready to sign in yet?")
+        demo_layout = QVBoxLayout(demo_box)
+        demo_help = QLabel(
+            "Try the app with safe mock data first. Demo Mode lets you preview the happy path, "
+            "rate limits, partial failures, empty libraries, and playlist errors without using a real account."
+        )
+        demo_help.setWordWrap(True)
+        demo_layout.addWidget(demo_help)
+
+        row = QHBoxLayout()
+        self.inline_demo_combo = QComboBox()
+        for name in sorted(mock_backend.SCENARIOS):
+            self.inline_demo_combo.addItem(mock_backend.SCENARIO_LABELS.get(name, name), name)
+        self.inline_demo_btn = QPushButton("Try Demo Mode")
+        self.inline_demo_btn.clicked.connect(self._start_inline_demo)
+        row.addWidget(self.inline_demo_combo, 1)
+        row.addWidget(self.inline_demo_btn)
+        demo_layout.addLayout(row)
+        layout.addWidget(demo_box)
+
+    def _start_inline_demo(self) -> None:
+        name = self.inline_demo_combo.currentData()
+        self.tw.enable_demo_mode(name)
+        self._connected = True
+        self.overall_label.setText(f"Demo Mode ready — scenario “{name}”. Click Next to preview it.")
+        self.completeChanged.emit()
 
     def _file_row(self, edit: QLineEdit) -> QWidget:
         row = QWidget()
@@ -1450,6 +1555,22 @@ class TransferWizard(QWizard):
         self.setWindowTitle(title)
         self.setWizardStyle(QWizard.ModernStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
+        self.setOption(QWizard.HaveCustomButton1, True)
+        self.setOption(QWizard.HaveCustomButton2, True)
+        self.setButtonText(QWizard.CustomButton1, "Quit")
+        self.setButtonText(QWizard.CustomButton2, "Clean Up")
+        self.customButtonClicked.connect(self._on_custom_button_clicked)
+        self.setButtonLayout(
+            [
+                QWizard.CustomButton1,
+                QWizard.CustomButton2,
+                QWizard.Stretch,
+                QWizard.BackButton,
+                QWizard.NextButton,
+                QWizard.FinishButton,
+                QWizard.CancelButton,
+            ]
+        )
         self.setMinimumSize(720, 620)
 
         # Per-run logger: friendly messages go to the UI, full detail to this file.
@@ -1471,6 +1592,8 @@ class TransferWizard(QWizard):
         self.scenario: Optional[str] = None
         self.cancel_event = threading.Event()
         self.transfer_running = False
+        self._quit_confirmed = False
+        self.cleanup_requested = False
 
         self.setPage(PAGE_AUTH, AuthPage(self))
         self.setPage(PAGE_OPTIONS, OptionsPage(self))
@@ -1490,7 +1613,85 @@ class TransferWizard(QWizard):
         self.source_client = source
         self.target_client = target
 
+    def enable_demo_mode(self, scenario: Optional[str] = None) -> None:
+        """Switch an already-open normal wizard into Demo Mode from Step 1."""
+        name = scenario or "happy"
+        self.demo_mode = True
+        self.scenario = name
+        source, target = _demo_clients(name)
+        self.attach_session(ExitStack(), source, target)
+        self.preview_loaded = False
+        self.cancel_event.clear()
+        if "(DEMO MODE)" not in self.windowTitle():
+            self.setWindowTitle(f"{self.windowTitle()}  (DEMO MODE)")
+        if self.logger is not None:
+            try:
+                self.logger.info("Demo Mode enabled from the Connect step: %s", name)
+            except Exception:
+                pass
+
+    def _on_custom_button_clicked(self, which: int) -> None:
+        if which == QWizard.CustomButton1:
+            self.close()
+        elif which == QWizard.CustomButton2:
+            self._schedule_cleanup()
+
+    def _schedule_cleanup(self) -> None:
+        if self.transfer_running:
+            QMessageBox.information(
+                self,
+                "Clean Up after transfer",
+                "Cleanup can’t be scheduled while a transfer is running. Try again after it completes.",
+            )
+            return
+        if self.cleanup_requested:
+            QMessageBox.information(self, "Clean Up scheduled", "Cleanup will run when you quit.")
+            return
+        text = (
+            "Clean Up will run when you quit. It will delete:\n\n"
+            "- transfer_liked_songs.venv/ (downloaded packages, about 250MB)\n"
+            "- Stored OAuth tokens/secrets from macOS Keychain\n"
+            "- .env credentials\n"
+            "- Local auth/token files in auth/ and the repo folder\n\n"
+            "Next launch will re-download dependencies and you’ll need to sign in again."
+        )
+        reply = QMessageBox.warning(
+            self,
+            "Schedule Clean Up?",
+            text,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.cleanup_requested = True
+        if self.logger is not None:
+            try:
+                self.logger.info("Cleanup scheduled for app exit.")
+            except Exception:
+                pass
+        QMessageBox.information(self, "Clean Up scheduled", "Cleanup will run when you quit.")
+
+    def _confirm_quit_if_needed(self) -> bool:
+        if not self.transfer_running or self._quit_confirmed:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Transfer in progress",
+            "Transfer in progress — are you sure you want to quit? A partial report will be saved.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._quit_confirmed = True
+            return True
+        return False
+
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override.
+        if not self._confirm_quit_if_needed():
+            event.ignore()
+            return
+
         # Stop any OAuth polling and an in-flight transfer promptly.
         self.cancel_event.set()
         try:
@@ -1524,6 +1725,14 @@ class TransferWizard(QWizard):
             except Exception:
                 pass
             self.exit_stack = None
+
+        if self.cleanup_requested:
+            if self.logger is not None:
+                try:
+                    self.logger.info("Running scheduled cleanup on exit.")
+                except Exception:
+                    pass
+            perform_cleanup(self.logger)
 
         if self.logger is not None:
             try:

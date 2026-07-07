@@ -390,7 +390,45 @@ def test_logging_creates_file():
 def test_demo_wizard_constructs():
     wizard = gui_transfer.build_wizard(demo_mode=True)
     assert "DEMO MODE" in wizard.windowTitle()
+    assert wizard.button(gui_transfer.QWizard.CustomButton1).text() == "Quit"
+    assert wizard.button(gui_transfer.QWizard.CustomButton2).text() == "Clean Up"
     wizard.close()
+
+
+def test_inline_demo_button_switches_normal_wizard():
+    wizard = gui_transfer.build_wizard(demo_mode=False)
+    auth = wizard.page(gui_transfer.PAGE_AUTH)
+    assert hasattr(auth, "inline_demo_btn")
+    auth.inline_demo_combo.setCurrentIndex(0)
+    auth._start_inline_demo()
+    assert wizard.demo_mode is True
+    assert auth.isComplete()
+    assert "DEMO MODE" in wizard.windowTitle()
+    wizard.close()
+
+
+def test_cleanup_removes_local_runtime_files():
+    import tempfile
+
+    original_script_dir = gui_transfer.SCRIPT_DIR
+    with tempfile.TemporaryDirectory(prefix="ls-cleanup-") as tmp:
+        root = Path(tmp)
+        gui_transfer.SCRIPT_DIR = root
+        (root / gui_transfer.APP_VENV_NAME).mkdir()
+        (root / gui_transfer.APP_VENV_NAME / "marker.txt").write_text("x", encoding="utf-8")
+        (root / ".env").write_text("SECRET=1", encoding="utf-8")
+        (root / ".env.example").write_text("example", encoding="utf-8")
+        (root / "auth").mkdir()
+        (root / "auth" / "account_a_oauth.json").write_text("{}", encoding="utf-8")
+        (root / "client_secret_test.json").write_text("{}", encoding="utf-8")
+        deleted = gui_transfer.perform_cleanup(logger=None)
+        assert gui_transfer.APP_VENV_NAME in deleted
+        assert not (root / gui_transfer.APP_VENV_NAME).exists()
+        assert not (root / ".env").exists()
+        assert (root / ".env.example").exists()
+        assert not (root / "auth" / "account_a_oauth.json").exists()
+        assert not (root / "client_secret_test.json").exists()
+    gui_transfer.SCRIPT_DIR = original_script_dir
 
 
 def test_friendly_errors_no_dump():
@@ -438,6 +476,8 @@ def main() -> int:
         test_account_file_status,
         test_logging_creates_file,
         test_demo_wizard_constructs,
+        test_inline_demo_button_switches_normal_wizard,
+        test_cleanup_removes_local_runtime_files,
         test_friendly_errors_no_dump,
     ]
     passed = 0

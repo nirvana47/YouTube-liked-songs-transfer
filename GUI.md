@@ -75,7 +75,7 @@ An **Advanced** option still lets you point at classic browser-header files inst
 
 ## What gets created
 
-- `.venv/` — the app's private Python environment (ignored by git, safe to delete; it is
+- `transfer_liked_songs.venv/` — the app's private Python environment (ignored by git, safe to delete; it is
   recreated automatically on the next launch).
 - `transfer_report.json` — a detailed record of the most recent run (ignored by git).
 - `logs/transfer-YYYYMMDD-HHMMSS.log` — a full technical log for each run, written to the
@@ -83,12 +83,29 @@ An **Advanced** option still lets you point at classic browser-header files inst
   friendly messages; if something goes wrong, the matching log file has the full detail
   (timestamps, step markers, and complete error traces). The Done step tells you exactly
   which log file to open.
+- `logs/setup.log` — quiet installer details from the double-click launcher. The Terminal
+  stays clean, but this file is useful if setup fails.
+
+## Clean up local app data
+
+Click **Clean Up** in the wizard footer when the app is idle. The app will warn you first,
+then schedule cleanup for when you quit. Cleanup deletes:
+
+- `transfer_liked_songs.venv/` — downloaded Python packages, roughly 250MB.
+- Stored OAuth tokens/secrets from macOS Keychain.
+- `.env` credentials.
+- Local auth/token files in `auth/` and the repo folder.
+
+Next launch will recreate the environment and you’ll need to sign in again. Cleanup cannot
+be scheduled while a transfer is running; finish or cancel the transfer first.
 
 ## Try it first without a real account (demo mode)
 
 Want to see how every situation is handled — including errors — before you sign in for
-real? Launch the app in **demo mode**. It uses a built-in mock account (no sign-in, no
-network) and lets you pick a scenario to watch:
+real? You can click the **Try Demo Mode** button on Step 1 right inside the app.
+
+Alternatively, you can launch the app in **demo mode** from the terminal. It uses a
+built-in mock account (no sign-in, no network) and lets you pick a scenario to watch:
 
 ```bash
 LSTRANSFER_DEMO=1 python gui_transfer.py
@@ -107,8 +124,8 @@ partial results, and clean cancellation for each. Normal (non-demo) behavior is 
 If you prefer to run it yourself instead of double-clicking:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv transfer_liked_songs.venv
+source transfer_liked_songs.venv/bin/activate
 pip install -r requirements.txt -r requirements-gui.txt
 python gui_transfer.py
 ```
