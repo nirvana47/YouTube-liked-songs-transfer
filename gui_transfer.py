@@ -44,7 +44,6 @@ try:
         QApplication,
         QCheckBox,
         QComboBox,
-        QFileDialog,
         QFormLayout,
         QFrame,
         QGroupBox,
@@ -55,6 +54,7 @@ try:
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QRadioButton,
         QScrollArea,
         QSpinBox,
         QTableWidget,
@@ -79,6 +79,7 @@ from ytmusicapi.models.content.enums import LikeStatus
 
 # Local, Qt-free support modules.
 import mock_backend
+from browser_auth import CurlParseError, browser_file_status, save_browser_headers
 from errors import classify_retryable, friendly_error as _base_friendly_error, setup_run_logger
 from oauth_flow import (
     GOOGLE_CLOUD_CONSOLE_URL,
@@ -257,6 +258,8 @@ PAGE_DONE = 4
 
 SOURCE_TOKEN_NAME = "account_a_oauth.json"
 TARGET_TOKEN_NAME = "account_b_oauth.json"
+SOURCE_HEADERS_NAME = "source_headers.json"
+TARGET_HEADERS_NAME = "target_headers.json"
 APP_VENV_NAME = "transfer_liked_songs.venv"
 
 
@@ -354,12 +357,23 @@ def _interruptible_sleep(seconds: float, cancel_event: Optional[threading.Event]
 # Step 1: Connect your accounts (full inline OAuth)
 # ---------------------------------------------------------------------------
 class _AccountSection:
-    """UI + state for one account's inline OAuth sign-in."""
+    """UI + state for one account's sign-in (browser-header *or* OAuth).
 
-    def __init__(self, page: "AuthPage", label: str, token_path: str) -> None:
+    A single section supports both sign-in methods and shows the one that
+    matches the page's currently selected method (see :meth:`set_mode`):
+
+    * **browser** (default, recommended) — a guided "paste your cURL" flow that
+      reuses the session already open in the user's browser; and
+    * **oauth** — ytmusicapi's OAuth *device* flow (kept available but flagged
+      as unreliable due to the upstream Google issue).
+    """
+
+    def __init__(self, page: "AuthPage", label: str, oauth_path: str, headers_path: str) -> None:
         self.page = page
         self.label = label
-        self.token_path = token_path
+        self.oauth_path = oauth_path
+        self.headers_path = headers_path
+        self.mode = "browser"  # "browser" or "oauth"; the page keeps this in sync
         self.ready = False
         self.cancel_event: Optional[threading.Event] = None
 
@@ -375,7 +389,7 @@ class _AccountSection:
         status_row.addWidget(self.signin_btn)
         outer.addLayout(status_row)
 
-        # The live sign-in panel (hidden until the user clicks Sign in).
+        # --- OAuth device-flow panel (hidden until the user clicks Sign in) ---
         self.panel = QWidget()
         panel_layout = QVBoxLayout(self.panel)
         panel_layout.setContentsMargins(10, 10, 10, 10)
@@ -428,11 +442,115 @@ class _AccountSection:
         self.panel.setVisible(False)
         outer.addWidget(self.panel)
 
+        # --- Browser-header guided panel (hidden until the user clicks Sign in) ---
+        self.browser_panel = self._build_browser_panel()
+        self.browser_panel.setVisible(False)
+        outer.addWidget(self.browser_panel)
+
         self._verification_url = ""
 
-    # -- status refresh ------------------------------------------------------
+    @property
+    def token_path(self) -> str:
+        """Path of the credential file for the currently selected method."""
+        return self.oauth_path if self.mode == "oauth" else self.headers_path
+
+    # -- browser-header guided panel ----------------------------------------
+    def _build_browser_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        reassure = QLabel(
+            "This copies your sign-in session from your browser — it's safe and "
+            "only used on your computer."
+        )
+        reassure.setWordWrap(True)
+        layout.addWidget(reassure)
+
+        steps = QLabel(
+            f"<b>Step A.</b> Open Chrome or Firefox and go to <b>music.youtube.com</b>. "
+            f"Make sure you're signed in as <b>{self.label}</b>.<br>"
+            "<b>Step B.</b> Open DevTools (<b>F12</b> or <b>Cmd+Option+I</b>) → <b>Network</b> tab.<br>"
+            "<b>Step C.</b> Refresh the page, then click any request to "
+            "<b>music.youtube.com</b> in the list.<br>"
+            "<b>Step D.</b> Right-click the request → <b>Copy</b> → <b>Copy as cURL (bash)</b>.<br>"
+            "<b>Step E.</b> Paste it in the box below and click <b>Use this session</b>."
+        )
+        steps.setWordWrap(True)
+        layout.addWidget(steps)
+
+        open_row = QHBoxLayout()
+        self.browser_open_btn = QPushButton("Open music.youtube.com")
+        self.browser_open_btn.clicked.connect(lambda: self._open_url("https://music.youtube.com"))
+        open_row.addWidget(self.browser_open_btn)
+        open_row.addStretch(1)
+        layout.addLayout(open_row)
+
+        self.curl_edit = QPlainTextEdit()
+        self.curl_edit.setPlaceholderText("Paste the copied cURL command here…")
+        self.curl_edit.setMinimumHeight(120)
+        layout.addWidget(self.curl_edit)
+
+        save_row = QHBoxLayout()
+        self.browser_save_btn = QPushButton("Use this session")
+        self.browser_save_btn.clicked.connect(self._save_browser_headers)
+        save_row.addWidget(self.browser_save_btn)
+        save_row.addStretch(1)
+        layout.addLayout(save_row)
+
+        self.browser_result = QLabel("")
+        self.browser_result.setWordWrap(True)
+        layout.addWidget(self.browser_result)
+        return panel
+
+    def _open_url(self, url: str) -> None:
+        try:
+            if QDesktopServices.openUrl(QUrl(url)):
+                return
+        except Exception:
+            pass
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    def _save_browser_headers(self) -> None:
+        text = self.curl_edit.toPlainText().strip()
+        if not text:
+            self.browser_result.setText("Paste the copied cURL command first.")
+            return
+        try:
+            save_browser_headers(text, self.headers_path)
+        except CurlParseError as exc:
+            self.browser_result.setText(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - keep the message friendly.
+            self.browser_result.setText(f"Could not read that paste: {friendly_error(exc)}")
+            return
+        self.browser_result.setText(f"✓ {self.label} ready.")
+        self.refresh_status()
+
+    def _start_browser_signin(self) -> None:
+        self.ready = False
+        self.page.refresh_overall()
+        self.panel.setVisible(False)
+        self.browser_result.setText("")
+        self.browser_panel.setVisible(True)
+        self.curl_edit.setFocus()
+
+    # -- mode + status refresh ----------------------------------------------
+    def set_mode(self, mode: str) -> None:
+        self.mode = "oauth" if mode == "oauth" else "browser"
+        self.panel.setVisible(False)
+        self.browser_panel.setVisible(False)
+        self.refresh_status()
+
     def refresh_status(self) -> None:
-        status, message = account_file_status(self.token_path)
+        if self.mode == "oauth":
+            status, message = account_file_status(self.oauth_path)
+        else:
+            status, message = browser_file_status(self.headers_path)
         if status == "ok":
             self.ready = True
             self.status_label.setText(f"✓ {message}")
@@ -442,10 +560,17 @@ class _AccountSection:
             self.status_label.setText(message)
             self.signin_btn.setText("Sign in")
         self.panel.setVisible(False)
+        self.browser_panel.setVisible(False)
         self.page.refresh_overall()
 
     # -- sign-in flow --------------------------------------------------------
     def start_signin(self) -> None:
+        if self.mode == "oauth":
+            self._start_oauth_signin()
+        else:
+            self._start_browser_signin()
+
+    def _start_oauth_signin(self) -> None:
         client_id, client_secret = self.page.current_credentials()
         if not client_id or not client_secret:
             self.page.show_credentials_needed()
@@ -454,6 +579,7 @@ class _AccountSection:
         self.page.refresh_overall()
         self.signin_btn.setEnabled(False)
         self.retry_btn.setVisible(False)
+        self.browser_panel.setVisible(False)
         self.panel.setVisible(True)
         self.spinner.setVisible(True)
         self.open_btn.setEnabled(False)
@@ -463,7 +589,7 @@ class _AccountSection:
         self.poll_label.setText("")
 
         self.cancel_event = threading.Event()
-        engine = OAuthSignInEngine(client_id, client_secret, self.token_path)
+        engine = OAuthSignInEngine(client_id, client_secret, self.oauth_path)
         worker = Worker(_oauth_signin_worker, engine, self.cancel_event)
         worker.logger = self.page.tw.logger
         worker.signals.info.connect(self._on_code)
@@ -584,7 +710,7 @@ class AuthPage(QWizardPage):
         else:
             self.setSubTitle(
                 "Sign in to both accounts right here — no terminal needed. "
-                "OAuth is the recommended, primary method."
+                "Browser sign-in is the recommended, working method."
             )
             self._build_oauth_ui(layout)
 
@@ -636,7 +762,33 @@ class AuthPage(QWizardPage):
 
     # -- OAuth UI ------------------------------------------------------------
     def _build_oauth_ui(self, layout: QVBoxLayout) -> None:
-        # Credentials
+        # Sign-in method chooser. Browser sign-in is the working default;
+        # OAuth is kept available but flagged as unreliable (upstream Google issue).
+        method_box = QGroupBox("How do you want to sign in?")
+        method_layout = QVBoxLayout(method_box)
+        self.method_browser_radio = QRadioButton("Browser sign-in (recommended)")
+        self.method_browser_radio.setChecked(True)
+        browser_hint = QLabel(
+            "Reuses the music.youtube.com session already open in Chrome or Firefox. "
+            "This is the reliable, working method — no Google Cloud setup needed."
+        )
+        browser_hint.setWordWrap(True)
+        browser_hint.setContentsMargins(24, 0, 0, 6)
+        self.method_oauth_radio = QRadioButton("OAuth (may not work — Google issue)")
+        oauth_hint = QLabel(
+            "Uses a Google Cloud OAuth client. Google currently has a server-side issue "
+            "that makes this fail for many people — use Browser sign-in if it doesn't work."
+        )
+        oauth_hint.setWordWrap(True)
+        oauth_hint.setContentsMargins(24, 0, 0, 0)
+        method_layout.addWidget(self.method_browser_radio)
+        method_layout.addWidget(browser_hint)
+        method_layout.addWidget(self.method_oauth_radio)
+        method_layout.addWidget(oauth_hint)
+        layout.addWidget(method_box)
+        self.method_browser_radio.toggled.connect(self._on_method_changed)
+
+        # Credentials (OAuth only)
         self.creds_box = QGroupBox("Google OAuth client credentials (one-time)")
         creds_layout = QVBoxLayout(self.creds_box)
         self.help_label = QLabel(
@@ -680,9 +832,15 @@ class AuthPage(QWizardPage):
         creds_layout.addLayout(save_row)
         layout.addWidget(self.creds_box)
 
-        # Account sign-in sections
-        self.source_section = _AccountSection(self, "Source account (A)", default_auth_path(SOURCE_TOKEN_NAME))
-        self.target_section = _AccountSection(self, "Target account (B)", default_auth_path(TARGET_TOKEN_NAME))
+        # Account sign-in sections (each supports both browser + OAuth methods)
+        self.source_section = _AccountSection(
+            self, "Source account (A)",
+            default_auth_path(SOURCE_TOKEN_NAME), default_auth_path(SOURCE_HEADERS_NAME),
+        )
+        self.target_section = _AccountSection(
+            self, "Target account (B)",
+            default_auth_path(TARGET_TOKEN_NAME), default_auth_path(TARGET_HEADERS_NAME),
+        )
         layout.addWidget(self.source_section.box)
         layout.addWidget(self.target_section.box)
 
@@ -697,22 +855,10 @@ class AuthPage(QWizardPage):
         verify_row.addWidget(self.overall_label, 1)
         layout.addLayout(verify_row)
 
-        # Advanced: browser-header files fallback.
-        self.advanced_check = QCheckBox("Advanced: use browser-header files instead of OAuth")
-        self.advanced_check.toggled.connect(self._toggle_advanced)
-        layout.addWidget(self.advanced_check)
-
-        self.browser_box = QGroupBox("Browser-header files (advanced)")
-        browser_form = QFormLayout(self.browser_box)
-        self.browser_source_edit = QLineEdit(default_auth_path("account_a.json"))
-        self.browser_target_edit = QLineEdit(default_auth_path("account_b.json"))
-        browser_form.addRow("Source (A):", self._file_row(self.browser_source_edit))
-        browser_form.addRow("Target (B):", self._file_row(self.browser_target_edit))
-        self.browser_box.setVisible(False)
-        layout.addWidget(self.browser_box)
-
         self._build_try_demo_ui(layout)
         self._prefill_from_env()
+        # Sync visibility to the default method (browser).
+        self._on_method_changed()
 
     def _build_try_demo_ui(self, layout: QVBoxLayout) -> None:
         demo_box = QGroupBox("Not ready to sign in yet?")
@@ -748,24 +894,9 @@ class AuthPage(QWizardPage):
         self.overall_label.setText(f"Demo Mode ready — scenario “{name}”. Click Next to preview it.")
         self.completeChanged.emit()
 
-    def _file_row(self, edit: QLineEdit) -> QWidget:
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        browse = QPushButton("Browse…")
-        browse.setFixedWidth(90)
-        browse.clicked.connect(lambda: self._browse_into(edit))
-        row_layout.addWidget(edit, 1)
-        row_layout.addWidget(browse)
-        return row
-
-    def _browse_into(self, edit: QLineEdit) -> None:
-        start_dir = str(SCRIPT_DIR / "auth")
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Choose an account file", start_dir, "JSON files (*.json);;All files (*)"
-        )
-        if path:
-            edit.setText(path)
+    def current_method(self) -> str:
+        """Return the selected sign-in method: 'browser' or 'oauth'."""
+        return "oauth" if self.method_oauth_radio.isChecked() else "browser"
 
     def _prefill_from_env(self) -> None:
         try:
@@ -798,40 +929,40 @@ class AuthPage(QWizardPage):
         except Exception as exc:  # noqa: BLE001
             self.save_env_status.setText(f"Could not save: {friendly_error(exc)}")
 
-    def _toggle_advanced(self, checked: bool) -> None:
-        self.browser_box.setVisible(checked)
-        self.source_section.box.setVisible(not checked)
-        self.target_section.box.setVisible(not checked)
-        self.creds_box.setVisible(not checked)
+    def _on_method_changed(self, *_: Any) -> None:
+        method = self.current_method()
+        # OAuth credentials are only relevant to the OAuth method.
+        self.creds_box.setVisible(method == "oauth")
+        self.source_section.set_mode(method)
+        self.target_section.set_mode(method)
         self.refresh_overall()
 
     def initializePage(self) -> None:
         if self.tw.demo_mode:
             return
         self._prefill_from_env()
-        self.source_section.refresh_status()
-        self.target_section.refresh_status()
+        method = self.current_method()
+        self.source_section.set_mode(method)
+        self.target_section.set_mode(method)
 
     def refresh_overall(self) -> None:
         if self.tw.demo_mode:
             return
-        if self.advanced_check.isChecked():
-            self.verify_btn.setEnabled(True)
-            self.overall_label.setText("Point the app at both browser-header files, then verify.")
-            return
         both_ready = self.source_section.ready and self.target_section.ready
         self.verify_btn.setEnabled(both_ready)
         if both_ready:
-            self.overall_label.setText("Both accounts are signed in. Click “Verify accounts & continue”.")
+            self.overall_label.setText("Both accounts are ready. Click “Verify accounts & continue”.")
+        elif self.current_method() == "browser":
+            self.overall_label.setText("Sign in to both accounts using your browser session to continue.")
         else:
             self.overall_label.setText("Sign in to both accounts to continue.")
 
     def _collect_config(self) -> dict[str, Any]:
-        if self.advanced_check.isChecked():
+        if self.current_method() == "browser":
             return {
                 "auth_mode": "browser",
-                "source_auth": self.browser_source_edit.text().strip(),
-                "target_auth": self.browser_target_edit.text().strip(),
+                "source_auth": self.source_section.headers_path,
+                "target_auth": self.target_section.headers_path,
                 "client_id": None,
                 "client_secret": None,
                 "keyring_service": KEYRING_SERVICE,
@@ -841,8 +972,8 @@ class AuthPage(QWizardPage):
         client_id, client_secret = self.current_credentials()
         return {
             "auth_mode": "oauth",
-            "source_auth": self.source_section.token_path,
-            "target_auth": self.target_section.token_path,
+            "source_auth": self.source_section.oauth_path,
+            "target_auth": self.target_section.oauth_path,
             "client_id": client_id or None,
             "client_secret": client_secret or None,
             "keyring_service": KEYRING_SERVICE,
